@@ -35,6 +35,7 @@ from heard import (
     history,
     hotkey,
     notify,
+    onboarding,
     project_memory,
     push_to_talk,
     updater,
@@ -3095,17 +3096,27 @@ class Daemon:
         path_hint = (ctx.get("abs_path") or None) if isinstance(ctx, dict) else None
         self.router.note_event(session_id, cwd or "", path_hint=path_hint)
 
-        # Suppress all narration until the user has finished the
-        # first-launch wizard. This is the right gate for the
-        # "Heard.app launched while a CC session was already running"
-        # case — without it, the daemon starts narrating tool calls
-        # while the user is mid-wizard, which competes with the welcome
-        # message and feels intrusive. Agent State + Working Memory
-        # observations above ran already, so when narration kicks back
-        # on (post-onboard reload), the harness has the recent context.
-        if not cfg.get("onboarded"):
+        # Suppress all narration until the user has finished setup. This
+        # is the right gate for the "Heard.app launched while a CC
+        # session was already running" case — without it, the daemon
+        # starts narrating tool calls while the user is mid-wizard, which
+        # competes with the welcome message and feels intrusive. Agent
+        # State + Working Memory observations above ran already, so when
+        # narration kicks back on (post-onboard reload), the harness has
+        # the recent context.
+        #
+        # "Finished setup" has two surfaces: the GUI wizard, and
+        # `heard install <agent>` for CLI-only installs (no .app). The
+        # resolver also self-heals a flag that drifted false on a machine
+        # with a hook already wired up — otherwise a config reset leaves
+        # a CLI install permanently and invisibly silent. See
+        # `onboarding.resolve_onboarded`.
+        onboarded, heal_onboarded = onboarding.resolve_onboarded(cfg)
+        if not onboarded:
             _log("event_drop", kind=kind, tag=tag, reason="not_onboarded")
             return
+        if heal_onboarded and onboarding.mark_onboarded():
+            _log("onboarded_healed", reason="hook_installed")
 
         # Prompt-intent events used to play a hardcoded "On it." ack
         # the moment the user submitted a prompt — filling the agent's

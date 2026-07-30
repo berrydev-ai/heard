@@ -13,11 +13,21 @@ see `CONTRIBUTING.md`.
 
 ## Process model
 
-One process — the menu-bar app (`Heard.app`) — runs the daemon as an
-in-process thread. Hooks installed by Claude Code / Codex are spawned as
-short-lived `python -m heard.hook <agent>` subprocesses. They read the
-hook payload from stdin, send a JSON message over a Unix-domain socket to
-the daemon, and exit.
+Heard runs two ways, and the difference matters for setup:
+
+- **App install** — the menu-bar app (`Heard.app`) runs the daemon as an
+  in-process thread. This is what most of this doc describes.
+- **CLI-only install** (`pip install -e .` + `heard install <agent>`, no
+  `.app` built) — there is no menu bar and no first-launch wizard. The
+  daemon is auto-spawned by the first hook event and supervised by
+  nothing. Everything works, but **every GUI-gated path has to have a
+  CLI equivalent**; see [CLI-only setup](#cli-only-setup) for the two
+  that bite.
+
+Hooks installed by Claude Code / Codex are spawned as short-lived
+`python -m heard.hook <agent>` subprocesses. They read the hook payload
+from stdin, send a JSON message over a Unix-domain socket to the daemon,
+and exit.
 
 ```
 CC tool call
@@ -49,6 +59,66 @@ finals. There are exactly three lanes:
    local Kokoro TTS option) is what keeps Heard from going silent, which
    for an ambient tool reads as "broken."
 
+## CLI-only setup
+
+Two things are wired to the GUI by default. Both have CLI equivalents
+now — if you add a third, give it one in the same change.
+
+### 1. The onboarding gate (`onboarded`)
+
+`daemon._handle_event` drops **every** hook event before narration until
+setup is marked finished:
+
+```python
+onboarded, heal_onboarded = onboarding.resolve_onboarded(cfg)
+if not onboarded:
+    _log("event_drop", kind=kind, tag=tag, reason="not_onboarded")
+    return
+```
+
+The flag defaults to False and has two writers:
+
+- **GUI** — the first-launch wizard, via `home_window._mark_onboarded`.
+- **CLI** — `heard install <agent>`, via `onboarding.after_install` →
+  `mark_onboarded()`. Wiring up an agent *is* the CLI's "setup finished"
+  signal; the GUI equivalent is closing the wizard.
+
+`onboarding.resolve_onboarded(cfg)` returns `(onboarded, should_heal)`
+and adds a **self-heal**: outside the `.app` bundle, an installed agent
+hook counts as proof setup happened, so a flag that drifted false
+(wiped config, the corrupt-config auto-reset in `config._read_yaml`, an
+upgrade from a pre-flag build) doesn't leave a CLI-only install
+permanently and invisibly mute. Inside the bundle the fallback is
+deliberately skipped — there the wizard is the authority, and it wires
+up the hook *during* the flow we'd otherwise read as "done". The GUI has
+its own parallel resolver, `ui._resolve_onboarded`, on the same shape.
+
+Debugging a "Heard is installed but never speaks" report starts here:
+`heard config get onboarded`, then grep the daemon log for
+`reason=not_onboarded`.
+
+### 2. Keys (no `.env`)
+
+**Nothing in the package loads a `.env` file, and it should stay that
+way.** `.env.example` documents the env-var names only. Reasons not to
+add a loader:
+
+- The daemon is a **single long-lived process shared by every project**.
+  It has no per-project environment, so one repo's `.env` would arm the
+  keys used to narrate every other repo's sessions.
+- It's normally **auto-spawned by a hook**, so it inherits the agent's
+  environment, not the shell you exported into — which `.env` file it
+  picked up would depend on which project happened to fire first.
+- `elevenlabs_api_key` isn't read from the environment anywhere
+  (`Daemon._make_tts` is config-only), so a loader would need new
+  plumbing rather than just a parser.
+- Auto-slurping secrets out of a cloned repo is a bad default.
+
+`heard config set <key> <value>` is the path. It writes to the user
+config dir, which the daemon re-reads via `config.load()` on **every
+event** — so a key takes effect with no daemon restart, whatever
+launched it. Config also wins over env in `persona._anthropic_key`.
+
 ## Module map
 
 This table is the canonical "what's in the codebase" reference. When you
@@ -57,7 +127,7 @@ same change — a drifted table is worse than none.
 
 | File | Responsibility |
 |---|---|
-| `heard/daemon.py` | Long-running daemon. Owns the speech queue, hotkey listener, audio monitor, multi-agent router, history append, periodic digest timer. Narration routing (`_handle_event`): tool events → fast-path templates; prose/finals → `harness.narrate`; harness punt → `_floor_text` (the no-LLM floor). Duplicate suppression drops identical raw events (`_is_duplicate_event`) and consecutive identical tool lines (`_is_duplicate_tool_line`). Socket commands dispatched in `_handle()`: `ping`, `status`, `pin`, `unpin`, `reload`, `stop`, `mute`, `unmute`, `feedback`, `report_defect`, `ask`, `recap`, `mute_session` / `unmute_session`, `event`. |
+| `heard/daemon.py` | Long-running daemon. Owns the speech queue, hotkey listener, audio monitor, multi-agent router, history append, periodic digest timer. Narration routing (`_handle_event`): observe first (Agent/Working/Project Memory), then the onboarding gate (`onboarding.resolve_onboarded` — drops everything until setup is finished), then tool events → fast-path templates; prose/finals → `harness.narrate`; harness punt → `_floor_text` (the no-LLM floor). Duplicate suppression drops identical raw events (`_is_duplicate_event`) and consecutive identical tool lines (`_is_duplicate_tool_line`). Socket commands dispatched in `_handle()`: `ping`, `status`, `pin`, `unpin`, `reload`, `stop`, `mute`, `unmute`, `feedback`, `report_defect`, `ask`, `recap`, `mute_session` / `unmute_session`, `event`. |
 | `heard/client.py` | Hook-side helpers: spawn the daemon if needed, send events / status / pin commands over the Unix socket. |
 | `heard/hook.py` | Entry-point invoked by the agent's hook command. Routes to `client.handle_cc_*` / `client.handle_codex_*`. |
 | `heard/wrapper.py` | `heard run <cmd> [args...]` — universal terminal wrapper. Spawns an agent, tees its stdout, and synthesizes events for agents without a native hook surface. |
@@ -84,7 +154,8 @@ same change — a drifted table is worse than none.
 | `heard/hotkey.py` + `accessibility.py` | pynput tap-hold listener. Daemon polls Accessibility trust and re-inits on the False→True transition. |
 | `heard/ui.py` | rumps menu bar. Persona / Speed / Verbosity submenus, Active agents, Options, Pause/Resume, status header, "Report a problem…" (the only user-facing feedback surface). |
 | `heard/settings_widgets.py` | Native NSToolbar widget primitives (theme constants, fonts, pill buttons, cards, rows). |
-| `heard/settings_window.py` | Settings panel + first-launch onboarding wizard. `SettingsController` (Account, Voice, Keys, Shortcuts, Advanced) + `_OnboardingController`. |
+| `heard/home_window.py` + `heard/onboarding.html` | Native `NSWindow` hosting `onboarding.html` in a `WKWebView` — the first-launch wizard and, once set up, the Home surface. `_mark_onboarded()` is the GUI writer of the `onboarded` flag. (Replaced the old `settings_window.py`.) |
+| `heard/onboarding.py` | **CLI-side onboarding.** `after_install(agent)` runs on the `heard install` path: marks `onboarded`, prints the next-steps block, posts an osascript banner. `resolve_onboarded(cfg)` is the daemon's narration gate + hook-based self-heal; `hook_installed()` aggregates the adapters' `is_installed()`. See [CLI-only setup](#cli-only-setup). |
 | `heard/prompt_window.py` | Native modal-dialog helpers (choice / text / defect-report). AppKit imports are lazy so importing on a CLI path doesn't pull AppKit. Main-thread only. |
 | `heard/notify.py` | User-visible macOS notifications via `osascript`. `notify(title, body, kind=…)` dedups per kind for 60s. |
 | `heard/service.py` | macOS LaunchAgent integration. Writes `~/Library/LaunchAgents/dev.heard.daemon.plist` and runs `launchctl load/unload`. |
@@ -95,8 +166,20 @@ same change — a drifted table is worse than none.
 
 ## Hot-patch workflow
 
-For Python-only changes (no native deps), iterate without rebuilding the
-.app by syncing the package into the installed bundle:
+**CLI-only install.** An editable install (`pip install -e .`) already
+points at your working tree, so there's nothing to sync — just bounce
+the daemon and let the next hook event respawn it:
+
+```bash
+heard stop
+```
+
+Tail `~/Library/Application Support/heard/daemon.log` to watch it come
+back on the next agent event.
+
+**App install.** For Python-only changes (no native deps), iterate
+without rebuilding the .app by syncing the package into the installed
+bundle:
 
 ```bash
 # NOTE: source is the PACKAGE dir (~/path/to/heard/heard/heard/), not the
@@ -162,4 +245,7 @@ In `~/Library/Application Support/heard/`:
 - `history.jsonl` — every utterance Heard spoke; each record has a
   unique `id`, with sibling `type="feedback"` records referencing them.
 - `defect_reports.jsonl` — local-only defect-report sidecar.
-- `config.yaml` — current settings (or use the menu-bar settings UI).
+- `config.yaml` — current settings. Read/write it with
+  `heard config get` / `heard config set <key> <value>` (or the
+  menu-bar settings UI on an app install). Only keys whose values
+  differ from `config.DEFAULTS` are persisted.

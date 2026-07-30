@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A CLI-only install (no menu-bar app) is no longer silent forever.
+  `heard install <agent>` now marks setup finished, so the daemon starts
+  narrating instead of dropping every hook event it receives. Previously
+  only the app's first-launch wizard could flip that flag, so a
+  source install had to be un-stuck by hand.
+- If that flag is later lost — a wiped or corrupted config — Heard heals
+  itself: an agent hook that's still wired up counts as proof setup
+  happened, and narration comes back on its own.
+
+### Changed
+
+- `.env.example` no longer implies Heard reads a `.env` file (it never
+  has). It now points at `heard config set`, which works no matter what
+  launched the daemon. `.env` is also gitignored now, so a stray real
+  key can't be committed.
+
 ## [1.1.21]
 
 ### Fixed

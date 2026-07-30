@@ -51,3 +51,25 @@ def _heard_config_dirs_isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("heard.config.PID_PATH", data_dir / "daemon.pid")
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_hooks(monkeypatch):
+    """Same isolation invariant, for the agent hook files.
+
+    `onboarding.hook_installed()` reads the developer's REAL
+    `~/.claude/settings.json` / `~/.codex/hooks.json` — the config-dir
+    fixture above can't reach those, they're the agents' own files. The
+    daemon's onboarding gate consults it (see
+    `onboarding.resolve_onboarded`), so without this stub the narration
+    tests would pass or fail depending on whether the machine running
+    them happens to have Heard wired up.
+
+    Default: no hooks installed. Stubbed at the ADAPTER level rather
+    than at `hook_installed` itself, so the aggregator stays the real
+    function under test. Tests that exercise the self-heal path
+    monkeypatch these back to True — `monkeypatch` is LIFO, so a later
+    patch in the test wins cleanly.
+    """
+    monkeypatch.setattr("heard.adapters.claude_code.is_installed", lambda: False)
+    monkeypatch.setattr("heard.adapters.codex.is_installed", lambda: False)
