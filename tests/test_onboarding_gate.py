@@ -8,6 +8,12 @@ intrusive. The gate suppresses hook event narration entirely until
 `cfg["onboarded"]` flips to True; the wizard sends a `reload` cmd at
 that point so the daemon picks up the new state immediately.
 
+Two surfaces set that flag: the GUI wizard, and `heard install <agent>`
+for CLI-only installs where no wizard ever opens. The gate resolves
+both through `onboarding.resolve_onboarded`, which also self-heals a
+flag that drifted false on a machine with a hook already wired up —
+see the CLI-only cases at the bottom of this file.
+
 What the gate does NOT touch:
   * The welcome greeting (`_maybe_greet`) — fires DURING the wizard
     as part of the onboarding experience. Different surface.
@@ -179,3 +185,65 @@ def test_greeting_uses_three_steps_not_four(tmp_path, monkeypatch):
     msg = next((c["text"] for c in captured if "Jarvis" in c.get("text", "")), "")
     assert "4 easy steps" not in msg
     assert "Three quick steps" in msg
+
+
+# --- CLI-only installs (no .app, so no wizard) ---------------------------
+
+
+def test_installed_hook_opens_the_gate_despite_a_drifted_flag(
+    tmp_path, monkeypatch
+):
+    """The CLI-only regression. `onboarded` is only ever set by the GUI
+    wizard or by `heard install`; if it drifts back to False (config
+    reset, the corrupt-config auto-reset in `config._read_yaml`, an
+    upgrade from a pre-flag build) nothing re-runs the install, so a
+    fork with no .app goes permanently and invisibly silent. An
+    installed hook is proof setup happened — narration must resume."""
+    monkeypatch.setattr("heard.adapters.claude_code.is_installed", lambda: True)
+    monkeypatch.setattr("heard.onboarding._in_app_bundle", lambda: False)
+    daemon, captured = _make_daemon(
+        tmp_path, monkeypatch,
+        {
+            "greeted": True,
+            "onboarded": False,
+            "elevenlabs_api_key": "sk_x",
+            "persona": "jarvis",
+        },
+    )
+    daemon._handle_event(_event(kind="final", neutral="finished the auth fix"))
+    assert len(captured) >= 1, "hook is installed but the gate stayed shut"
+
+
+def test_drifted_flag_is_healed_so_the_check_runs_once(tmp_path, monkeypatch):
+    """The gate reads config on every event, so the fallback must
+    persist — otherwise we'd stat the agents' settings files forever."""
+    monkeypatch.setattr("heard.adapters.claude_code.is_installed", lambda: True)
+    monkeypatch.setattr("heard.onboarding._in_app_bundle", lambda: False)
+    healed: list = []
+    monkeypatch.setattr(
+        "heard.onboarding.mark_onboarded", lambda: healed.append(True) or True
+    )
+    daemon, _captured = _make_daemon(
+        tmp_path, monkeypatch,
+        {"greeted": True, "onboarded": False, "elevenlabs_api_key": "sk_x"},
+    )
+    daemon._handle_event(_event(kind="final", neutral="finished the auth fix"))
+    assert healed == [True], "gate opened without persisting the healed flag"
+
+
+def test_no_hook_no_flag_stays_silent(tmp_path, monkeypatch):
+    """Package installed but `heard install` never run: there's no agent
+    wired up, so there's nothing to narrate for and no reason to assume
+    setup finished."""
+    monkeypatch.setattr("heard.onboarding._in_app_bundle", lambda: False)
+    daemon, captured = _make_daemon(
+        tmp_path, monkeypatch,
+        {
+            "greeted": True,
+            "onboarded": False,
+            "elevenlabs_api_key": "sk_x",
+            "persona": "jarvis",
+        },
+    )
+    daemon._handle_event(_event(kind="final", neutral="finished the auth fix"))
+    assert captured == [], "narrated with neither the flag nor an installed hook"

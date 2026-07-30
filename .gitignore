@@ -40,3 +40,8 @@ daemon.pid
 
 # Local per-repo narration label (user-specific, never committed)
 .heard.yaml
+
+# Real keys. `.env.example` tells you to keep your key names here, and
+# the repo shouldn't rely on every contributor having a global ignore
+# rule for it. (Heard itself never reads .env — see .env.example.)
+.env

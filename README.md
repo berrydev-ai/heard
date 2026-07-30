@@ -115,7 +115,7 @@ Deeper knobs (verbosity profiles, per-repo overrides, narration preferences) liv
 
 ## Self-host (open source)
 
-Heard is Apache-2.0. The packaged app above is the managed experience; if you'd rather run it from source - your own keys, no account, full control - clone and configure it:
+Heard is Apache-2.0. The packaged app above is the managed experience; if you'd rather run it from source - your own keys, no account, full control - clone and configure it. **This path needs no menu-bar app**: the CLI is a complete install on its own.
 
 ```bash
 git clone https://github.com/heardlabs/heard.git
@@ -123,17 +123,51 @@ cd heard
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# bring your own keys - used directly by the daemon, nothing through our servers
+# 1. bring your own keys - used directly by the daemon, nothing through our servers
 heard config set elevenlabs_api_key <your-key>   # voice (skip this → local Kokoro)
 heard config set anthropic_api_key <your-key>    # narration brain (skip → neutral templates)
 
-# wire up your coding agent - the daemon auto-starts on the first tool call
-heard install claude-code        # also: codex-cli, codex-app
+# 2. wire up your coding agent - the daemon auto-starts on the first tool call
+heard install claude-code        # also: codex
 ```
+
+**Run `heard install` last, and don't skip it.** It does two jobs: it writes the hook into your agent's settings, *and* it records that setup is finished. Until setup is marked finished the daemon stays deliberately silent - it still receives every hook event, it just doesn't speak (see [Why is Heard silent?](#faq)). Re-running it any time is safe and idempotent.
+
+Check it took:
+
+```bash
+heard config get onboarded    # expect: True
+```
+
+### Keys: use `heard config set`, not `.env`
+
+**Heard does not read `.env` files.** `.env.example` lists the env-var names for reference, but copying it to `.env` configures nothing.
+
+Environment variables are unreliable here even when you export them, because the daemon is normally **auto-spawned by an agent hook** - so it inherits your agent's environment, not the shell you typed `export` into. And the ElevenLabs key is never read from the environment at all; it's config-only.
+
+`heard config set` writes to the user config dir, which the daemon re-reads on every event - so a key takes effect immediately with no restart, whatever launched the daemon.
 
 That's the DIY path: you own keys, updates, and config. Everything's configurable (personas in `heard/personas/*.md`, verbosity in `heard/profiles/*.yaml`, per-repo `.heard.yaml`). The managed tiers are the same engine with the voices + brain run for you.
 
 ## FAQ
+
+<details>
+<summary><b>Heard is installed but silent - nothing is ever spoken. Why?</b></summary>
+
+The most common cause is that **setup was never marked finished**, so the narration gate is still shut. The daemon receives every hook event and drops it - by design, so it can't talk over first-run setup.
+
+Check and fix:
+
+```bash
+heard config get onboarded        # False → the gate is shut
+heard install claude-code         # wires the hook AND marks setup finished
+```
+
+`heard install` is idempotent, so re-running it is the safe fix. Heard also self-heals this: if the flag is lost later (a wiped or corrupted config) while an agent hook is still wired up, the daemon treats the installed hook as proof setup happened and turns narration back on by itself.
+
+If narration is on but you hear nothing, check that a voice is configured - `heard config get elevenlabs_api_key`, or download the local Kokoro voice.
+
+</details>
 
 <details>
 <summary><b>Does my agent's output leave my machine?</b></summary>
