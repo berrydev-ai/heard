@@ -14,15 +14,19 @@ the upstream code quietly assume the app is there to do setup for you.
 
 ## The short version
 
-Three settings in Heard's config file and you're done:
+Wire up an agent, then set two keys:
 
 ```bash
-.venv/bin/heard config set onboarded true
+.venv/bin/heard install claude-code
 .venv/bin/heard config set anthropic_api_key sk-ant-YOUR-KEY
 .venv/bin/heard config set elevenlabs_api_key YOUR-KEY
 ```
 
-Everything else — the daemon, the hooks, autostart — was already working.
+`heard install` is the load-bearing one — it's what tells Heard setup is
+finished, so the daemon will actually narrate. The keys buy you a brain
+and a voice.
+
+Everything else — the daemon, the hooks, autostart — takes care of itself.
 
 ---
 
@@ -72,24 +76,24 @@ Python **3.13** is what's in use here. The project accepts 3.11–3.13.
 README mentions `codex-cli` and `codex-app` — those are **not** accepted
 by this CLI and will exit with "Unknown agent".
 
-This edits `~/.claude/settings.json` and `~/.codex/hooks.json`.
+This edits `~/.claude/settings.json` and `~/.codex/hooks.json`, **and
+marks setup finished** so the daemon will narrate. That second part is
+easy to miss — see Trap 1 below.
 
-### 3. The three config settings
+### 3. The two keys
 
 | Setting | Why it's needed |
 |---|---|
-| `onboarded true` | **The critical one.** Without it the daemon silently drops every event. See below. |
 | `anthropic_api_key` | The narration brain. Without it you get canned templates only. |
 | `elevenlabs_api_key` | The voice. Without it, everything runs but plays no sound. |
 
 ```bash
-.venv/bin/heard config set onboarded true
 .venv/bin/heard config set anthropic_api_key sk-ant-YOUR-KEY
 .venv/bin/heard config set elevenlabs_api_key YOUR-KEY
 ```
 
-Each of these **takes effect immediately** — `config set` pings the
-running daemon to reload. No restart needed, including for the voice.
+Both **take effect immediately** — `config set` pings the running daemon
+to reload. No restart needed, including for the voice.
 
 ### 4. Autostart
 
@@ -105,7 +109,7 @@ plist runs `.venv/bin/python3 -m heard.daemon` with `RunAtLoad` and
 
 ## Two traps specific to this fork
 
-### Trap 1 — the `onboarded` gate makes it totally silent
+### Trap 1 — the `onboarded` gate (fixed, but worth understanding)
 
 **Symptom:** the daemon is alive, hooks are firing, and *nothing* happens.
 The log fills with:
@@ -114,35 +118,54 @@ The log fills with:
 ev=event_drop kind=tool_pre tag=tool_bash_generic reason=not_onboarded
 ```
 
-**Cause:** `heard/daemon.py` refuses to narrate anything until the
-`onboarded` config flag is true. That flag is **only ever set by the
-menu-bar app's first-launch wizard.** No app means nothing ever sets it,
-so a fresh install is permanently mute.
+**Cause:** `heard/daemon.py` narrates nothing until the `onboarded`
+config flag is true. That flag used to be set **only by the menu-bar
+app's first-launch wizard** — and with no app, nothing ever set it, so a
+source install was permanently mute. A **nightclub with no doorman**: the
+door locked, and nobody coming to open it.
 
-It's a **nightclub with no doorman** — the door is locked and nobody is
-coming to open it.
+**This is fixed now.** `heard install <agent>` marks setup finished
+(`onboarding.after_install` → `mark_onboarded`), because wiring up an
+agent is the CLI's equivalent of closing the wizard.
 
-**Fix:** `heard config set onboarded true`
+There's also a **self-heal** for the case where the flag drifts back to
+false on a machine that's plainly set up — a wiped config dir, the
+corrupt-config auto-reset in `config._read_yaml`, an upgrade from an
+older build. `onboarding.resolve_onboarded` treats **an installed agent
+hook as proof setup happened**, reopens the gate, and writes the flag
+back once (`ev=onboarded_healed`).
 
-This will bite again on any fresh install or config reset.
+So if you ever hit `reason=not_onboarded`, **run `heard install
+claude-code`** — don't set the flag by hand.
+
+> Inside the `.app` bundle the self-heal deliberately stands down: there
+> the wizard owns the flag, and it wires up the very hook we'd otherwise
+> read as "done" — mid-flow, exactly when the gate should stay shut. It
+> only applies to CLI installs like this one.
 
 ### Trap 2 — the `.env` file does nothing
 
-**Nothing in the `heard` package reads `.env`.** There's no dotenv
-loading anywhere in the codebase. So `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, and `HEARD_BRAIN_MODEL` sitting in the repo's `.env`
-are invisible to the daemon.
+**Nothing in the `heard` package reads `.env`, and that's deliberate.**
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `HEARD_BRAIN_MODEL` sitting in
+the repo's `.env` are invisible to the daemon.
 
-Worse, **exporting them in your shell doesn't reliably help either.** The
-daemon is usually started by launchd at login, or auto-spawned by a hook
-subprocess — neither inherits your interactive shell's environment.
+It isn't an oversight. The daemon is **one long-lived process shared by
+every project**, normally auto-spawned by a hook, so it has no
+per-project environment. One repo's `.env` would arm the keys narrating
+every *other* repo, and which file won would depend on which project
+fired first.
+
+**Exporting in your shell doesn't reliably help either** — the daemon is
+started by launchd at login or spawned by a hook subprocess, neither of
+which inherits your interactive shell.
 
 **Fix:** put everything in Heard's own config via `heard config set`.
-That's the only path that always works.
+Config is re-read on every event, so keys take effect with no restart.
 
-> The code *does* check env vars as a fallback (`persona._anthropic_key`
-> reads `ANTHROPIC_API_KEY`), which is why this is confusing — the
-> mechanism exists, the daemon just never sees the values.
+> The brain *does* check `ANTHROPIC_API_KEY` as a fallback
+> (`persona._anthropic_key`), which is why this is confusing — the
+> mechanism exists, the daemon just never sees the value.
+> `elevenlabs_api_key` isn't read from the environment at all.
 
 ---
 
@@ -245,7 +268,8 @@ and the verbosity profile rather than assuming something broke.
 
 | What you see in the log | What it means | Fix |
 |---|---|---|
-| `reason=not_onboarded` | The app-only gate is shut | `heard config set onboarded true` |
+| `reason=not_onboarded` | Setup was never marked finished | `heard install claude-code` (not the raw flag) |
+| `ev=onboarded_healed` | Normal — a drifted flag self-repaired | Nothing to fix |
 | `reason=no_voice_configured` | No TTS backend at all | Set `elevenlabs_api_key` |
 | `via=floor` + `event_harness_punt` | Brain unreachable, using canned templates | Set `anthropic_api_key` in config (not `.env`) |
 | `via=fastpath` | Normal — tool events never use the brain by design | Nothing to fix |
@@ -440,12 +464,21 @@ These are all app-only and **do not apply here**:
 Still fully relevant in `AGENTS.md`: the **process model**, the **module
 map**, and the **coding conventions**.
 
+`AGENTS.md` and `README.md` now carry their own **CLI-only** sections, so
+they're largely accurate for this fork. `CONTRIBUTING.md` is the one
+still written entirely around the app.
+
 ---
 
-## Known rough edge
+## Divergence from upstream
 
-The `onboarded` gate will silently mute a fresh install every time,
-because nothing in a CLI-only setup ever sets it. Worth fixing in code
-eventually — most likely by having `heard install <agent>` mark setup as
-complete, since wiring up an agent is the CLI equivalent of finishing the
-wizard. Until then, **remember to set it by hand.**
+This fork carries a few changes upstream doesn't have. Worth knowing when
+you pull from `heardlabs/heard`:
+
+- **`heard install <agent>` marks onboarding complete**, plus the
+  hook-based self-heal in `onboarding.resolve_onboarded`. Upstream still
+  relies solely on the GUI wizard.
+- **`.env` is gitignored** and `.env.example` no longer claims that
+  copying it to `.env` configures anything — it doesn't.
+- **This file**, plus the fork-only rule in `CLAUDE.md` and the guard in
+  `.claude/hooks/fork-guard.sh`.
